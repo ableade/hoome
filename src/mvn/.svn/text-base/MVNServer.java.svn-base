@@ -1,0 +1,201 @@
+/*
+ * MVNServer.java
+ * April 2, 2013
+ */
+package mvn;
+
+
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.net.DatagramPacket;
+import java.net.DatagramSocket;
+import java.net.InetSocketAddress;
+import java.net.SocketException;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.logging.FileHandler;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+
+/**
+ * The server for the maven class
+ * @author Sola adekunle
+ *
+ */
+public class MVNServer {
+	public static Set <InetSocketAddress> addresses;
+	public static Logger aLogger = Logger.getLogger("server.log"); //logger for logging erros
+	public static int servPort;
+	public static DatagramSocket socket;
+	public static DatagramPacket packet;
+
+
+	/**
+	 * sets up the MVN server
+	 * @throws SocketException 
+	 */
+	public static void init () throws SocketException {
+		MVNServer.addresses = new HashSet <InetSocketAddress>();
+		MVNServer.socket = new DatagramSocket (servPort);
+		MVNServer.packet = new DatagramPacket(new byte[Consts.MAX_MAVEN_BUFFER_SIZE], Consts.MAX_MAVEN_BUFFER_SIZE);
+
+		FileHandler handler = null;
+		try {
+			handler = new FileHandler("server.log");
+		} catch (SecurityException e) {
+			e.printStackTrace();
+		} catch (IOException e) {
+			e.printStackTrace();
+		}
+		handler.setFormatter(new MyLogger());
+
+		// Add to the desired logger
+		MVNServer.aLogger.addHandler(handler);
+		MVNServer.aLogger.setUseParentHandlers(false);
+	}
+
+	public static void main(String[] args) {
+
+		if (args.length != 1) { // Test for correct argument list
+			throw new IllegalArgumentException("Parameter(s): <Port>");
+		}
+		MVNServer.servPort = Integer.parseInt(args[0]);
+
+		try {
+			MVNServer.init();
+		} catch (SocketException e) {
+			e.printStackTrace();
+		}   //set the server up
+
+		while (true) { // Run forever, receiving and echoing datagrams
+			try {
+				MVNServer.receive();
+			} catch (IOException e) {
+				e.printStackTrace();
+			}
+		}
+	}
+
+	/**
+	 * adds an address to the list of maven addresses maintained
+	 * @param anAddress the address to be added
+	 */
+	public static void addAddress (InetSocketAddress anAddress) {
+		if(MVNServer.addresses.size() < Consts.MAX_BYTE_SIZE) {
+			MVNServer.addresses.add(anAddress);
+		}
+	}
+
+	/**
+	 * adds addresses to a maven response
+	 * @param aMaven the answer request to being sent
+	 */
+	public static void populateAddresses (MavenCommon aMaven) {
+		for(InetSocketAddress address : MVNServer.addresses) {
+			aMaven.addAddress(address);
+		}
+	}
+
+	/**
+	 * receives maven packets from client
+	 * @throws IOException if I/O error occurs
+	 */
+	public static void receive () throws IOException {
+		MavenCommon response = null;
+		socket.receive(packet); // Receive packet from client
+		int receivedLength = packet.getLength();
+		//create a new byte array with the actual length of bytes received
+		byte[] actualBytesReceived = new byte[receivedLength] ;	
+		System.arraycopy(packet.getData(), 0, actualBytesReceived, 0, receivedLength);
+		System.out.println("Handling client at " + packet.getAddress().getHostAddress()
+				+ " on port " + packet.getPort());
+
+		MavenCommon aRequest = new MavenCommon ();
+		ByteArrayInputStream inputstream = new ByteArrayInputStream (actualBytesReceived);
+		try {
+			aRequest.decode(inputstream);
+		} catch (IOException e) {
+			response = new MavenCommon(Consts.ANSWER_REQUEST_TYPE, 1, 0);
+			MVNServer.aLogger.log(Level.WARNING, "communication problem");
+		}
+
+		if(response == null)  { // if there was no problem receiving proceed
+			switch (aRequest.getType()) {
+			case Consts.REQUEST_NODE_TYPE:  //if type RN
+				if(aRequest.getError() ==0) {
+					response = new MavenCommon (Consts.ANSWER_REQUEST_TYPE, 0, aRequest.getSessionId());
+					MVNServer.populateAddresses(response);
+					MVNServer.aLogger.log(Level.INFO, "Received: " + aRequest.toString());
+				} else {
+					response = new MavenCommon(Consts.ANSWER_REQUEST_TYPE, 2, aRequest.getSessionId());
+					MVNServer.aLogger.log(Level.INFO, "Unexpected error" + aRequest.toString());
+				}
+				break;
+
+			case Consts.REQUEST_MAVEN_TYPE:  //if type RM
+				if(aRequest.getError() ==0) {
+					response = new MavenCommon (Consts.ANSWER_REQUEST_TYPE, 0, aRequest.getSessionId());
+					MVNServer.populateAddresses(response);
+					MVNServer.aLogger.log(Level.INFO, "Received: " + aRequest.toString());
+				} else {
+					response = new MavenCommon(Consts.ANSWER_REQUEST_TYPE, 2, aRequest.getSessionId());
+					MVNServer.aLogger.log(Level.INFO, "Unexpected error" + aRequest.toString());
+				}
+
+			case Consts.NODE_ADDITION_TYPE:
+				for(InetSocketAddress addr: aRequest.getAddresses()) {
+					MVNServer.addAddress(addr);
+				}
+				MVNServer.aLogger.log(Level.INFO, "Received:" + aRequest.toString());
+
+				break;			
+			case Consts.MAVEN_ADDITION_TYPE:
+				for(InetSocketAddress addr: aRequest.getAddresses()) {
+					MVNServer.addAddress(addr);
+				}
+				MVNServer.aLogger.log(Level.INFO, "Received:" + aRequest.toString());
+				break;
+
+			case Consts.NODE_DELETION_TYPE:
+				MVNServer.addresses.removeAll(aRequest.getAddresses());
+				MVNServer.aLogger.log(Level.INFO, "Received:" + aRequest.toString());
+				break;
+
+			case Consts.MAVEN_DELETION_TYPE:
+				MVNServer.addresses.removeAll(aRequest.getAddresses());
+				MVNServer.aLogger.log(Level.INFO, "Received:" + aRequest.toString());
+				break;	
+				
+			default: response = new MavenCommon(Consts.ANSWER_REQUEST_TYPE, 2, aRequest.getSessionId());
+			}
+		}
+		if(response != null) {
+			MVNServer.sendMessage(response, packet);
+		}
+		MVNServer.packet.setLength(Consts.MAX_MAVEN_BUFFER_SIZE); // Reset length to avoid shrinking buffer
+	}
+
+	/**
+	 * sends answer request back to client
+	 * @param response the answer request being sent back
+	 */
+	private static void sendMessage(MavenCommon response, DatagramPacket receivedPacket) {
+		ByteArrayOutputStream outputStream = new ByteArrayOutputStream (); 
+		try {
+			response.encode(outputStream);
+		} catch (IOException e) {
+			e.printStackTrace();
+		}
+
+		DatagramPacket aPacket = new DatagramPacket (outputStream.toByteArray(), outputStream.toByteArray().length,
+				receivedPacket.getAddress(), receivedPacket.getPort());
+		MVNServer.aLogger.log(Level.INFO, "Sending " + aPacket.toString());
+		try {
+			MVNServer.socket.send(aPacket);
+		} catch (IOException e) {
+			e.printStackTrace();
+		}
+	}
+}
+
